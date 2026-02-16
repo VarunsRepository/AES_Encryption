@@ -105,16 +105,16 @@ inline uint8_t subByte(uint8_t x) { return AES_SBOX[x]; }
 
 //Round constants for XOR-ing the first-lane of a new round-key to get the interim-word W0 
 static const uint32_t RCON[10] = { 
-    0x01000000, 
-    0x02000000, 
-    0x04000000, 
-    0x08000000, 
-    0x10000000, 
-    0x20000000, 
-    0x40000000, 
-    0x80000000, 
-    0x1B000000, 
-    0x36000000 };
+    0x01, 
+    0x02, 
+    0x04, 
+    0x08, 
+    0x10, 
+    0x20, 
+    0x40, 
+    0x80, 
+    0x1B, 
+    0x36 };
 
     
 void print_m128i_lanes(const char *label, __m128i value)
@@ -195,43 +195,62 @@ void AES128_CORE::expandKey(const __m128i key, int currentRound) {
     __m128i substituted = subBytes(rotated);
     print_m128i_lanes("substituted", substituted);        
 
-    // 4. //generating the round cnstant in a 12-bit variable foramt XOR-ing the substitutedBlock with the round constant in SIMD instruction format/
-    __m128i rcon128 = _mm_set_epi32(RCON[currentRound - 1], 0, 0, 0); //[currentRound - 1] cause array starts at 0, ;) - classic Programmer error
-    print_m128i_lanes("~~~~ RCON128 block for XOR-ing", rcon128);        
+    // 4. //generating the round cnstant in a 128bit variable foramt XOR-ing the substitutedBlock with the round constant in SIMD instruction format/
+    __m128i rcon128 = _mm_set_epi32( RCON[currentRound - 1], 0, 0, 0); //[currentRound - 1] cause array starts at 0, ;) - classic Programmer error
+    print_m128i_lanes("~~~~ RCON128 block for XOR-ing~~~~ just for viewing", rcon128);        
 
 
      __m128i temp = _mm_xor_si128(substituted, rcon128);
+            temp =  _mm_shuffle_epi32(temp, _MM_SHUFFLE(3,3,3,3));
     // Please note that we could have extracted the 4 words W0, W1, W2 and W3  into uint32_t like the following 
         // uint32_t W0 = _mm_extract_epi32(currentKey, 0);
         // uint32_t W1 = _mm_extract_epi32(currentKey, 1);
         // uint32_t W2 = _mm_extract_epi32(currentKey, 2);
         // uint32_t W3 = _mm_extract_epi32(currentKey, 3);
     //But we are trying to follow the SIMD Design pattern here, not to go back the scalar data types
-    print_m128i_lanes("substituted_block XOR RCON_block", temp);
+    print_m128i_lanes("temp_RounKey = Substituted_block XOR RCON_block - only Lane 4", temp);
 
-    // 5. Extracting the individual lanes from the previous key 
-    __m128i w0 = key;
-    __m128i w1 = _mm_srli_si128(key, 4);
-    __m128i w2 = _mm_srli_si128(key, 8);
-    __m128i w3 = _mm_srli_si128(key, 12);
+    // 5. //Creating a block for final roundkey
+    // we will use the trick used by the CPU to calculate the final roundkey i.e. Shift + XORing to get the final key 
+    __m128i finalRoundkey = _mm_xor_si128(key, temp); // W0 = W0 ⊕ Temp, other lanes temporarily wrong
+    print_m128i_lanes("key", key);
+    print_m128i_lanes("TEMP", temp);        
+    print_m128i_lanes("Final Roundkey after first XOR ", finalRoundkey);
+    //Now the final key is [w0⊕T, w1⊕T, w2⊕T, w3⊕T]
+    // w0 is finalised. w1, w2 and w3 are remaining
+    
+     
+    // Shift new_key left by 4 bytes (32 bits) so as W0 can XOR with W1
+    temp = _mm_slli_si128(key, 4);
+    finalRoundkey = _mm_xor_si128(finalRoundkey, temp);
+    print_m128i_lanes("TEMP", temp);    
+    print_m128i_lanes("Final Roundkey after second XOR ", finalRoundkey);
+    //Now the final key is [w0⊕T, w0⊕w1⊕T, w2⊕T, w3⊕T]
+    // w0 and w1 are finalised. w2 and w3 are remaining
+        
 
-    // 6. XOR-ing the block with corresponding lane from the previous key
-    __m128i k0 = _mm_xor_si128(w0, temp);
-    __m128i k1 = _mm_xor_si128(w1, k0);
-    __m128i k2 = _mm_xor_si128(w2, k1);
-    __m128i k3 = _mm_xor_si128(w3, k2);
+    // Shift again by 4 bytes so as  
+    // W1 can XOR with W2  
+    temp = _mm_slli_si128(temp, 4);
+    finalRoundkey = _mm_xor_si128(finalRoundkey, temp);
+    print_m128i_lanes("TEMP", temp);
+    print_m128i_lanes("Final Roundkey after third XOR ", finalRoundkey);
+    //Now the final key is [w0⊕T, w0⊕w1⊕T, w0⊕w1⊕w2⊕T, w3⊕T]
+    // w0, w1 w2 are finalised. w3 is remaining
+                
 
-    // 7. Repacking the 4 lanes into the 128-bit memory
-    __m128i nextKey = _mm_set_epi32(
-        _mm_cvtsi128_si32(k3),
-        _mm_cvtsi128_si32(k2),
-        _mm_cvtsi128_si32(k1),
-        _mm_cvtsi128_si32(k0)
-    );
+    // Shift one last time by 4 bytes
+    // so as W2 can XOR with W3
+    temp = _mm_slli_si128(temp, 4);
+    finalRoundkey = _mm_xor_si128(finalRoundkey, temp);
+    print_m128i_lanes("TEMP", temp);        
+    print_m128i_lanes("Final Roundkey after fourth XOR ", finalRoundkey);
+    // w0, w1 w2 and W3 are finalised 
+     
+    print_m128i_lanes("finalRoundkey", finalRoundkey);
 
-    print_m128i_lanes("roundkey", nextKey);
-
-    roundKeys[currentRound + 1] = nextKey;
+    //adding the roundkey to the roundKeys  array
+    roundKeys[currentRound + 1] = finalRoundkey;
 }
 
  
