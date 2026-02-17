@@ -47,20 +47,20 @@ static inline __m128i getRotateMask(RotateBlock kind) {
         case RotateBlock::ShiftRowsForEncryption:
             // AES ShiftRows: row1 +1, row2 +2, row3 +3
             return _mm_set_epi8(
-                15,  3,  7, 11,
-                10, 14,  2,  6,
-                 5,  9, 13,  1,
-                 0,  4,  8, 12
+                11, 7, 2, 6,      // Column3
+                1, 12, 8, 3,      // Column2
+                14, 13, 9, 4,     // Column1
+                15, 10, 5, 0      // Column0
             );
 
         case RotateBlock::None:
         default:
             // Identity mask: output[i] = input[i]
             return _mm_set_epi8(
-                15, 14, 13, 12,
-                11, 10,  9,  8,
-                 7,  6,  5,  4,
-                 3,  2,  1,  0
+                11, 7, 2, 6,      // Column3
+                1, 12, 8, 3,      // Column2
+                14, 13, 9, 4,     // Column1
+                15, 10, 5, 0      // Column0
             );
     }
 }
@@ -196,7 +196,7 @@ void AES128_CORE::expandKey(const __m128i key, int currentRound) {
     print_m128i_lanes("substituted", substituted);        
 
     // 4. //generating the round cnstant in a 128bit variable foramt XOR-ing the substitutedBlock with the round constant in SIMD instruction format/
-    __m128i rcon128 = _mm_set_epi32( RCON[currentRound - 1], 0, 0, 0); //[currentRound - 1] cause array starts at 0, ;) - classic Programmer error
+    __m128i rcon128 = _mm_set_epi32( RCON[currentRound], 0, 0, 0); //[currentRound - 1] cause array starts at 0, ;) - classic Programmer error
     print_m128i_lanes("~~~~ RCON128 block for XOR-ing~~~~ just for viewing", rcon128);        
 
 
@@ -270,10 +270,31 @@ __m128i AES128_CORE::mixColumns(__m128i state){ return state;}
 __m128i AES128_CORE::addRoundKey(__m128i state, __m128i key){ return state;}
 
 AES128_CORE::AES128_CORE(const __m128i key){
-    expandKey(key, 1) ;
+    
+    roundKeys[0] = key;  ///adding the first RoundKey Manually to the Arrays 
+//     cout << "roundkey for R2";
+//     expandKey(roundKeys[0], 0);
+ 
+    for(uint8_t round = 0; round <10; ++round ){ expandKey(roundKeys[round], round);     }
+     
 }
 
-__m128i AES128_CORE::encryptBlock(__m128i block){ return block;}
+__m128i AES128_CORE::encryptBlock(__m128i block){ 
+    
+    __m128i keyPreWhitening = _mm_xor_si128( block, roundKeys[0]) ; // prewhitening step that XORs the key and block
+     print_m128i_lanes("keyPreWhitening:", keyPreWhitening);
+
+    __m128i substitutedBlock = subBytes(keyPreWhitening);
+    print_m128i_lanes("substitutedBlock:", substitutedBlock);
+
+    __m128i rowsShiftedBlock = shiftBytesInsideBlock(substitutedBlock,
+                                            RotateBlock::ShiftRowsForEncryption);
+    print_m128i_lanes("rowsShiftedBlock", rowsShiftedBlock);                                            
+
+
+    return keyPreWhitening;
+
+}
 
 
 // -----------------------------------------------------------------------------
@@ -414,10 +435,10 @@ void Test_till_the_current_point(){
     __m128i previousLane = _mm_shuffle_epi32(Key, 0xFF);
      print_m128i_lanes("previousLane", previousLane);      
     __m128i mask =  _mm_set_epi8(
-         12	,15	,   14	,   13	,  
-         8	,11	,   10	,   9	,  
-         4	,7	,   6	,   5	,  
-         0	, 3	,   2	,   1	  
+         12	, 15	,   14	,   13	,  
+         8	, 11	,   10	,   9	,  
+         4	, 7	    ,   6	,   5	,  
+         0	, 3	    ,   2	,   1	  
     );
 
     __m128i roated = _mm_shuffle_epi8(previousLane, mask);          
@@ -453,8 +474,11 @@ int main()
     print_m128i_lanes("Plaintext:", PT);
 
     AES128_CORE keyGen(Key);
+
+    __m128i CT = keyGen.encryptBlock(PT);
+  //   print_m128i_lanes("CT Substituted:", PT);
      
-    //Test_till_the_current_point();
+     
 
 }
 
