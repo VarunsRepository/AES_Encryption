@@ -38,29 +38,32 @@ static inline __m128i getRotateMask(RotateBlock kind) {
         case RotateBlock::LeftShiftForKeyExpansion:
             // RotWord: rotate each 32-bit word left by 1 byte
             return _mm_set_epi8(
-             12	,15	,   14	,   13	,  
-             8	,11	,   10	,   9	,  
-             4	,7	,   6	,   5	,  
-             0	, 3	,   2	,   1	  
+             12	, 15	,   14	,   13	,  
+             8	, 11	,   10	,   9	,  
+             4	,  7    ,   6	,   5	,  
+             0	,  3	,   2	,   1	  
             );
 
         case RotateBlock::ShiftRowsForEncryption:
             // AES ShiftRows: row1 +1, row2 +2, row3 +3
             return _mm_set_epi8(
-                11, 7, 2, 6,      // Column3
-                1, 12, 8, 3,      // Column2
-                14, 13, 9, 4,     // Column1
-                15, 10, 5, 0      // Column0
-            );
+            // Row3        Row2    Row1     Row0
+            //                             LSB of the ROW
+                 11        , 6     , 1  ,   12,
+                 7         , 2     ,13  ,   8 ,
+                 3         , 14    , 9  ,   4 ,
+                15         , 10    , 5  ,   0      
+            //                             MSB of the ROW
+                    );              
 
         case RotateBlock::None:
         default:
             // Identity mask: output[i] = input[i]
             return _mm_set_epi8(
-                11, 7, 2, 6,      // Column3
-                1, 12, 8, 3,      // Column2
-                14, 13, 9, 4,     // Column1
-                15, 10, 5, 0      // Column0
+                11,  7,  2,  6,      // Column3 or Lane0
+                1,  12,  8,  3,      // Column2 or Lane2
+                14, 13,  9,  4,     // Column1 or Lane1
+                15, 10,  5,  0      // Column0 or Lane0
             );
     }
 }
