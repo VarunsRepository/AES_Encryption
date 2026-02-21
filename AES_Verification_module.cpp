@@ -1,74 +1,106 @@
 #include <iostream>
 #include <iomanip>
 #include <bitset>
-#include <wmmintrin.h>
-#include <emmintrin.h>
-#include <smmintrin.h>
 #include <cstdint>
+#include <wmmintrin.h> // to make use of all SingleInstructionMultipleData(SIMD) instructions that we're using for our encryption-process. 
+#include <emmintrin.h> // to make use of all SingleInstructionMultipleData(SIMD) instructions that we're using for our encryption-process.
+#include <smmintrin.h> // to make use of all SingleInstructionMultipleData(SIMD) instructions that we're using for our encryption-process.
 
-//to make use of all SingleInstructionMultipleData(SIMD) instructions that we're using for our encryption-process.
-//Note that I have used an AMD CPU for this assignent, AMD and Intel CPUs differe slightly in the implementation of a few instructions
-//#include <immintrin.h>  
 
 using namespace std;
 
 /*
-src/
- ├─ aes128_core.h / .cpp     // software AES implementation
- ├─ aes128_hw.h  / .cpp      // AES-NI wrappers (for verification only)
+// Note that I have used an AMD Ryzen 7 5800U CPU for this assignent.
+   AMD and Intel CPUs slightly differ in the implementation of a few SIMD instructions
+
+Project Structure
+ ├─ AES128_CORE.h / .cpp     // software AES implementation
+ ├─ AES128_NI.h  / .cpp      // AES-NI Which directly calls the x86 Instruction to compute the AES rounds and CypherText (for verification only)
  ├─ test_vectors.h           // known plaintext/ciphertext pairs
  └─ main.cpp                 // runs software AES and verifies against HW
 
  Classes description
-AES128 → software AES class (encryptBlock, decryptBlock, keyExpansion)
-AES128_HW → wrapper written using AES Instruction for the CPU, used ONLY for tests / verification of interim results
+AES128_CORE → software AES class (encryptBlock, decryptBlock, keyExpansion)
+AES128_NI → wrapper written using AES Instruction for the CPU, used ONLY for tests / verification of interim results
 */
 
 // a simple enum that would help us to determine the right order for block rotaton
-enum RotateBlock {               
-    None,                       // no rotation
-    LeftShiftForKeyExpansion,   // RotWord
-    ShiftRowsForEncryption      // ShiftRows
+enum RotateBlock
+{
+    None,                                // no rotation
+    LeftShiftForKeyExpansion,            // RotWord
+    ShiftRowsForEncryption,              // ShiftRows
+    RotateColumns_SecondVectorAlignMask, // To align the second Matrix for rotateColumn stage in encryption - matrix multplication in Galouis Feilds
+    RotateColumns_ThirdVectorAlignMask,  // To align the first vector for rotateColumn matrix multplication in Galouis Feilds
+    RotateColumns_FourthVectorAlignMask, // To align the first vector for rotateColumn matrix multplication in Galouis Feilds
+
 };
 
-//inlne function that helps us to get the final order for a block-rotation 
-static inline __m128i getRotateMask(RotateBlock kind) {    
-    switch (kind) {
+// inlne function that helps us to get the final order for a block-rotation
+static inline __m128i getRotateMask(RotateBlock kind)
+{
+    switch (kind)
+    {
 
-        case RotateBlock::LeftShiftForKeyExpansion:
-            // RotWord: rotate each 32-bit word left by 1 byte
-            return _mm_set_epi8(
-             12	, 15	,   14	,   13	,  
-             8	, 11	,   10	,   9	,  
-             4	,  7    ,   6	,   5	,  
-             0	,  3	,   2	,   1	  
-            );
+    case RotateBlock::LeftShiftForKeyExpansion:
+        // RotWord: rotate each 32-bit word left by 1 byte
+        return _mm_set_epi8(
+            12, 15, 14, 13,
+            8, 11, 10, 9,
+            4, 7, 6, 5,
+            0, 3, 2, 1);
 
-        case RotateBlock::ShiftRowsForEncryption:
-            // AES ShiftRows: row1 +1, row2 +2, row3 +3
-            return _mm_set_epi8(
+    case RotateBlock::ShiftRowsForEncryption:
+        // AES ShiftRows: row1 +1, row2 +2, row3 +3
+        return _mm_set_epi8(
             // Row3        Row2    Row1     Row0
             //                             LSB of the ROW
-                 11        , 6     , 1  ,   12,
-                 7         , 2     ,13  ,   8 ,
-                 3         , 14    , 9  ,   4 ,
-                15         , 10    , 5  ,   0      
+            11, 6, 1, 12,
+            7, 2, 13, 8,
+            3, 14, 9, 4,
+            15, 10, 5, 0
             //                             MSB of the ROW
-                    );              
+        );
+ 
 
-        case RotateBlock::None:
-        default:
-            // Identity mask: output[i] = input[i]
-            return _mm_set_epi8(
-                11,  7,  2,  6,      // Column3 or Lane0
-                1,  12,  8,  3,      // Column2 or Lane2
-                14, 13,  9,  4,     // Column1 or Lane1
-                15, 10,  5,  0      // Column0 or Lane0
-            );
+        //each element of the mixColumns stage  is like  2A + 2B + C + D in Galouis feilds
+    case RotateBlock::RotateColumns_SecondVectorAlignMask: //this vector contains the terms of the Matrix B for the above realtion
+        return _mm_set_epi8(
+            12, 15, 14, 13,
+            8, 11, 10, 9,
+            4, 7, 6, 5,
+            0, 3, 2, 1
+        );
+
+    case RotateBlock::RotateColumns_ThirdVectorAlignMask: //this vector contains the terms of the Matrix C for the above realtion
+        return _mm_set_epi8(
+           13, 12, 12, 14,
+            9,  8,  8, 10, 
+            5,  4,  4,  6, 
+            1,  0,  0,  2        
+        );
+
+    case RotateBlock::RotateColumns_FourthVectorAlignMask: //this vector contains the terms of the Matrix D for the above realtion
+        return _mm_set_epi8(
+            14, 13, 15, 15, 
+            10,  9, 11, 11, 
+            6,   5,  7, 7, 
+            2,   1,  3, 3
+        );
+
+    case RotateBlock::None:
+    default:
+        // Identity mask: output[i] = input[i]
+        return _mm_set_epi8(
+            11, 7, 2, 6,  // Column3 or Lane0
+            1, 12, 8, 3,  // Column2 or Lane2
+            14, 13, 9, 4, // Column1 or Lane1
+            15, 10, 5, 0  // Column0 or Lane0
+        );
     }
 }
 
-static const uint8_t AES_SBOX[256] = {              //S-Box which we will use using a simple lookup function 
+static const uint8_t AES_SBOX[256] = { // S-Box which we will use using a simple lookup function
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
     0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0,
@@ -100,26 +132,24 @@ static const uint8_t AES_SBOX[256] = {              //S-Box which we will use us
     0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94,
     0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
     0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68,
-    0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
-};
+    0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16};
 
-//Helper fnction that would return the substitution value
+// Helper fnction that would return the substitution value. This will perform the Lookup for a single byte for the S-Box Subsitution
 inline uint8_t subByte(uint8_t x) { return AES_SBOX[x]; }
 
-//Round constants for XOR-ing the first-lane of a new round-key to get the interim-word W0 
-static const uint32_t RCON[10] = { 
-    0x01, 
-    0x02, 
-    0x04, 
-    0x08, 
-    0x10, 
-    0x20, 
-    0x40, 
-    0x80, 
-    0x1B, 
-    0x36 };
+// Round constants for XOR-ing the first-lane of a new round-key to get the interim-word W0
+static const uint32_t RCON[10] = {
+    0x01,
+    0x02,
+    0x04,
+    0x08,
+    0x10,
+    0x20,
+    0x40,
+    0x80,
+    0x1B,
+    0x36};
 
-    
 void print_m128i_lanes(const char *label, __m128i value)
 {
     alignas(16) uint8_t bytes[16];
@@ -158,302 +188,344 @@ void print_m128i_lanes(const char *label, __m128i value)
     cout << dec << endl; // reset back to decimal
 }
 
-
-class AES128_CORE {
+class AES128_CORE
+{
 private:
-    __m128i roundKeys[11];  //every key is 128 bits; 10 round keys + 1 initial key so a total of 1 128-bit slots are needed
-    __m128i shiftBytesInsideBlock(__m128i block, RotateBlock mode); 
+    __m128i roundKeys[11]; // every key is 128 bits; 10 round keys + 1 initial key so a total of 1 128-bit slots are needed
+    __m128i shiftBytesInsideBlock(__m128i block, RotateBlock mode);
 
     void expandKey(const __m128i key, int currentRound);
-    __m128i subBytes(__m128i state);
-    __m128i shiftRows(__m128i state);
-    __m128i mixColumns(__m128i state);
-    __m128i addRoundKey(__m128i state, __m128i key);
+    __m128i subBytes(__m128i state);      // Returns the S-Box substitution of a block
+    __m128i shiftRows(__m128i state);     // Second stage in the encryption round f a block
+    __m128i GF_multipyBy2(__m128i state); // returns the product of every word in current block with 2 in GF 
+    __m128i GF_multipyBy3(__m128i state); // returns the product of every word in current block with 3 in GF
+    __m128i mixColumns(__m128i state);    // penultimate stage for the Encryption round of a block 
+    __m128i addRoundKey(__m128i state, __m128i key); // last stage in encryption round 
 
 public:
     AES128_CORE(const __m128i key);
     __m128i encryptBlock(__m128i block);
 };
- 
 
-
-__m128i AES128_CORE::shiftBytesInsideBlock(__m128i block, RotateBlock mode) 
-{ 
-    __m128i mask = getRotateMask(mode); 
-    return _mm_shuffle_epi8(block, mask); 
+__m128i AES128_CORE::shiftBytesInsideBlock(__m128i block, RotateBlock mode)
+{
+    __m128i mask = getRotateMask(mode);
+    return _mm_shuffle_epi8(block, mask);
 }
 
-void AES128_CORE::expandKey(const __m128i key, int currentRound) {
+void AES128_CORE::expandKey(const __m128i key, int currentRound)
+{
 
     // 1. Extracts the last-lane/last 4 bytes from the current key
     __m128i previousLane = _mm_shuffle_epi32(key, 0xFF);
     print_m128i_lanes("previousLane", previousLane);
 
-    // 2. Rotates the last-lane(W3) extracted from the key by 1 byte and store inside a 128-bit variable  
+    // 2. Rotates the last-lane(W3) extracted from the key by 1 byte and store inside a 128-bit variable
     __m128i rotated = shiftBytesInsideBlock(previousLane,
                                             RotateBlock::LeftShiftForKeyExpansion);
-    print_m128i_lanes("rotated", rotated);                                            
+    print_m128i_lanes("rotated", rotated);
 
     // 3. perform the S-Box substitution for the 4 bytes that were rotated above
     __m128i substituted = subBytes(rotated);
-    print_m128i_lanes("substituted", substituted);        
+    print_m128i_lanes("substituted", substituted);
 
     // 4. //generating the round cnstant in a 128bit variable foramt XOR-ing the substitutedBlock with the round constant in SIMD instruction format/
-    __m128i rcon128 = _mm_set_epi32( RCON[currentRound], 0, 0, 0); //[currentRound - 1] cause array starts at 0, ;) - classic Programmer error
-    print_m128i_lanes("~~~~ RCON128 block for XOR-ing~~~~ just for viewing", rcon128);        
+    __m128i rcon128 = _mm_set_epi32(RCON[currentRound], 0, 0, 0); //[currentRound - 1] cause array starts at 0, ;) - classic Programmer error
+    print_m128i_lanes("~~~~ RCON128 block for XOR-ing~~~~ just for viewing", rcon128);
 
-
-     __m128i temp = _mm_xor_si128(substituted, rcon128);
-            temp =  _mm_shuffle_epi32(temp, _MM_SHUFFLE(3,3,3,3));
-    // Please note that we could have extracted the 4 words W0, W1, W2 and W3  into uint32_t like the following 
-        // uint32_t W0 = _mm_extract_epi32(currentKey, 0);
-        // uint32_t W1 = _mm_extract_epi32(currentKey, 1);
-        // uint32_t W2 = _mm_extract_epi32(currentKey, 2);
-        // uint32_t W3 = _mm_extract_epi32(currentKey, 3);
-    //But we are trying to follow the SIMD Design pattern here, not to go back the scalar data types
+    __m128i temp = _mm_xor_si128(substituted, rcon128);
+    temp = _mm_shuffle_epi32(temp, _MM_SHUFFLE(3, 3, 3, 3));
+    // Please note that we could have extracted the 4 words W0, W1, W2 and W3  into uint32_t like the following
+    // uint32_t W0 = _mm_extract_epi32(currentKey, 0);
+    // uint32_t W1 = _mm_extract_epi32(currentKey, 1);
+    // uint32_t W2 = _mm_extract_epi32(currentKey, 2);
+    // uint32_t W3 = _mm_extract_epi32(currentKey, 3);
+    // But we are trying to follow the SIMD Design pattern here, not to go back the scalar data types
     print_m128i_lanes("temp_RounKey = Substituted_block XOR RCON_block - only Lane 4", temp);
 
     // 5. //Creating a block for final roundkey
-    // we will use the trick used by the CPU to calculate the final roundkey i.e. Shift + XORing to get the final key 
+    // we will use the trick used by the CPU to calculate the final roundkey i.e. Shift + XORing to get the final key
     __m128i finalRoundkey = _mm_xor_si128(key, temp); // W0 = W0 ⊕ Temp, other lanes temporarily wrong
     print_m128i_lanes("key", key);
-    print_m128i_lanes("TEMP", temp);        
+    print_m128i_lanes("TEMP", temp);
     print_m128i_lanes("Final Roundkey after first XOR ", finalRoundkey);
-    //Now the final key is [w0⊕T, w1⊕T, w2⊕T, w3⊕T]
-    // w0 is finalised. w1, w2 and w3 are remaining
-    
-     
+    // Now the final key is [w0⊕T, w1⊕T, w2⊕T, w3⊕T]
+    //  w0 is finalised. w1, w2 and w3 are remaining
+
     // Shift new_key left by 4 bytes (32 bits) so as W0 can XOR with W1
     temp = _mm_slli_si128(key, 4);
     finalRoundkey = _mm_xor_si128(finalRoundkey, temp);
-    print_m128i_lanes("TEMP", temp);    
+    print_m128i_lanes("TEMP", temp);
     print_m128i_lanes("Final Roundkey after second XOR ", finalRoundkey);
-    //Now the final key is [w0⊕T, w0⊕w1⊕T, w2⊕T, w3⊕T]
-    // w0 and w1 are finalised. w2 and w3 are remaining
-        
+    // Now the final key is [w0⊕T, w0⊕w1⊕T, w2⊕T, w3⊕T]
+    //  w0 and w1 are finalised. w2 and w3 are remaining
 
-    // Shift again by 4 bytes so as  
-    // W1 can XOR with W2  
+    // Shift again by 4 bytes so as
+    // W1 can XOR with W2
     temp = _mm_slli_si128(temp, 4);
     finalRoundkey = _mm_xor_si128(finalRoundkey, temp);
     print_m128i_lanes("TEMP", temp);
     print_m128i_lanes("Final Roundkey after third XOR ", finalRoundkey);
-    //Now the final key is [w0⊕T, w0⊕w1⊕T, w0⊕w1⊕w2⊕T, w3⊕T]
-    // w0, w1 w2 are finalised. w3 is remaining
-                
+    // Now the final key is [w0⊕T, w0⊕w1⊕T, w0⊕w1⊕w2⊕T, w3⊕T]
+    //  w0, w1 w2 are finalised. w3 is remaining
 
     // Shift one last time by 4 bytes
     // so as W2 can XOR with W3
     temp = _mm_slli_si128(temp, 4);
     finalRoundkey = _mm_xor_si128(finalRoundkey, temp);
-    print_m128i_lanes("TEMP", temp);        
+    print_m128i_lanes("TEMP", temp);
     print_m128i_lanes("Final Roundkey after fourth XOR ", finalRoundkey);
-    // w0, w1 w2 and W3 are finalised 
-     
+    // w0, w1 w2 and W3 are finalised
+
     print_m128i_lanes("finalRoundkey", finalRoundkey);
 
-    //adding the roundkey to the roundKeys  array
+    // adding the roundkey to the roundKeys  array
     roundKeys[currentRound + 1] = finalRoundkey;
 }
 
- 
-__m128i AES128_CORE::subBytes(__m128i block){
-
-    alignas(16) uint8_t bytes[16]; 
-    _mm_storeu_si128((__m128i*)bytes, block); 
-    
-    for (int i = 0; i < 16; ++i) { 
-        bytes[i] = AES_SBOX[bytes[i]]; 
-    } 
-
-    return _mm_loadu_si128((__m128i*)bytes);
-}
-__m128i AES128_CORE::shiftRows(__m128i state){ return state;}
-__m128i AES128_CORE::mixColumns(__m128i state){ return state;}
-__m128i AES128_CORE::addRoundKey(__m128i state, __m128i key){ return state;}
-
-AES128_CORE::AES128_CORE(const __m128i key){
-    
-    roundKeys[0] = key;  ///adding the first RoundKey Manually to the Arrays 
-//     cout << "roundkey for R2";
-//     expandKey(roundKeys[0], 0);
- 
-    for(uint8_t round = 0; round <10; ++round ){ expandKey(roundKeys[round], round);     }
-     
-}
-
-__m128i AES128_CORE::encryptBlock(__m128i block){ 
-    
-    __m128i keyPreWhitening = _mm_xor_si128( block, roundKeys[0]) ; // prewhitening step that XORs the key and block
-     print_m128i_lanes("keyPreWhitening:", keyPreWhitening);
-
-    __m128i substitutedBlock = subBytes(keyPreWhitening);
-    print_m128i_lanes("substitutedBlock:", substitutedBlock);
-
-    __m128i rowsShiftedBlock = shiftBytesInsideBlock(substitutedBlock,
-                                            RotateBlock::ShiftRowsForEncryption);
-    print_m128i_lanes("rowsShiftedBlock", rowsShiftedBlock);                                            
-
-
-    return keyPreWhitening;
-
-}
-
-
-// -----------------------------------------------------------------------------
-// generateRoundKey
-// -----------------------------------------------------------------------------
-// Computes the next AES-128 round key using AES-NI's key schedule assist
-// instruction (_mm_aeskeygenassist_si128).
-//
-// IMPORTANT:
-//  - The AESKEYGENASSIST intrinsic requires the round constant (Rcon) to be a
-//    compile-time immediate. Therefore, we cannot pass the round number directly
-//    as a function parameter. Instead, we select the correct instruction using
-//    a switch statement, where each case uses a literal immediate.
-//
-//  - The intrinsic only computes the "T-word" (RotWord + SubWord + Rcon) for
-//    the key schedule. It does NOT generate the full 16-byte round key.
-//
-//  - On AMD CPUs, the T-word appears cleanly in lane 3, so we broadcast lane 3
-//    across all lanes using _mm_shuffle_epi32(..., 0xff).
-//
-//  - The final round key words W4–W7 are computed using the standard AES-128
-//    key schedule XOR chain:
-//        W4 = W0 ⊕ T
-//        W5 = W1 ⊕ W4
-//        W6 = W2 ⊕ W5
-//        W7 = W3 ⊕ W6
-// -----------------------------------------------------------------------------
-
-__m128i generateRoundKey(const __m128i currentKey, const uint8_t currentRound)
+__m128i AES128_CORE::subBytes(__m128i block)
 {
-    __m128i temp;
 
-    // -------------------------------------------------------------------------
-    // Step 1: Use AESKEYGENASSIST with a compile-time immediate Rcon value.
-    // -------------------------------------------------------------------------
-    switch (currentRound)
+    alignas(16) uint8_t bytes[16];             // We need to store the block into a 16 element uint8_t array for lookup.
+                                               // This is the only part where we're deviating from SIMD design pattern for AES
+    _mm_storeu_si128((__m128i *)bytes, block); // SIMD instruction to store the block into bytes
+
+    for (int i = 0; i < 16; ++i)
     {
-    case 1:
-        temp = _mm_aeskeygenassist_si128(currentKey, 0x01);
-        break;
-    case 2:
-        temp = _mm_aeskeygenassist_si128(currentKey, 0x02);
-        break;
-    case 3:
-        temp = _mm_aeskeygenassist_si128(currentKey, 0x04);
-        break;
-    case 4:
-        temp = _mm_aeskeygenassist_si128(currentKey, 0x08);
-        break;
-    case 5:
-        temp = _mm_aeskeygenassist_si128(currentKey, 0x10);
-        break;
-    case 6:
-        temp = _mm_aeskeygenassist_si128(currentKey, 0x20);
-        break;
-    case 7:
-        temp = _mm_aeskeygenassist_si128(currentKey, 0x40);
-        break;
-    case 8:
-        temp = _mm_aeskeygenassist_si128(currentKey, 0x80);
-        break;
-    case 9:
-        temp = _mm_aeskeygenassist_si128(currentKey, 0x1B);
-        break;
-    case 10:
-        temp = _mm_aeskeygenassist_si128(currentKey, 0x36);
-        break;
-    default:
-        temp = _mm_setzero_si128(); // invalid round
-        break;
+        bytes[i] = AES_SBOX[bytes[i]]; // inline function call, this is just a lookup into the s-box
     }
 
-    print_m128i_lanes("AESKEYGENASSIST output:", temp);
+    return _mm_loadu_si128((__m128i *)bytes);
+}
 
-    // -------------------------------------------------------------------------
-    // Step 2: Extract the T-word.
+// Internal function to Shift Rows - we are simply moving the elements in a block 
+// using a 4x4 rotation mask. Since we're using the AES instructions, all 16 bytes can be moved in a single instruction
+__m128i AES128_CORE::shiftRows(__m128i state)
+{
+    state = shiftBytesInsideBlock(state,
+                                  RotateBlock::ShiftRowsForEncryption);
+    return state;
+}
+
+//function to multiply all the 16 words of a block by 2 but in Galouis feild.
+//we've used some neat SIMD tricks to speed up the process
+__m128i AES128_CORE::GF_multipyBy2(__m128i state)
+{
+
+    __m128i MSB_positional_mask = _mm_and_si128(state, _mm_set1_epi8(0x80)); // input AND mask(0B10000000) treating the whole state as a single 128-bit words
+    //__m128i MSB_positional_mask = _mm_and_epi32( state, _mm_set1_epi8(0x80) );   // input AND mask(0B10000000) treating the whole state as 4 32-bit words
+
+    MSB_positional_mask = _mm_srli_epi16(MSB_positional_mask, 7); // shifting the MSB in the positional mask to bit-0(lowes bit) so as we can multiply it with the 0x1B
+    // treating the whole block as 4 16-bit registers and then left-shiting by 7-bits until the MSB from the positonal mask moves to the LSB
+
+    MSB_positional_mask = _mm_cmpeq_epi8(MSB_positional_mask, _mm_set1_epi8(0x01));
+    // treating the block as 16 8-bit words, compare each word with 0x01, if its one, assign the value 0xFF to the word, else assign zero
+
+    MSB_positional_mask = _mm_and_si128(MSB_positional_mask, _mm_set1_epi8(0x1B));
+    // treating the block as a 128-bit word,  AND it with 16 8-bit words of value 0x1B, the previous step retured a mask comprision 0x00 and 0xFF
+    // so now, we re changing those 0xFF values to 0x1B
+
+    __m128i shifted = _mm_slli_epi16(state, 1); // finally we are shifting the state by 1 bit, a.k.a. multiply by 2 in GF
+    // [
+    //  Word(3)[15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0 ]                    Word(3)[14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,'0' ]
+    //  Word(2)[15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0 ] -(left shifted )-> Word(2)[14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,'0' ]
+    //  Word(1)[15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0 ]                    Word(1)[14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,'0' ]
+    //  Word(0)[15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0 ]                    Word(0)[14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,'0' ]
+    // ]
+    // but this inherently adds the MSB from the lower bytes to the higher bytes in the 16 bit word,
+    // i.e. Word's bit[7] is actually the LSB of the next byte.
+    // The words are 16 bit, to counter that, we must turn that bit to zero which is why we AND the result with 0x0FE or 0B11111110
+
+    shifted = _mm_and_si128(shifted, _mm_set1_epi8(0xFE));
+
+    return _mm_xor_si128(shifted, MSB_positional_mask);
+}
+
+//function to multiply all the 16 words of a block by 3 but in Galouis feild.
+__m128i AES128_CORE::GF_multipyBy3(__m128i state)
+{
+    __m128i mul2 = GF_multipyBy2(state);
+    return _mm_xor_si128(mul2, state);
+}
+
+__m128i AES128_CORE::mixColumns(__m128i state)
+{
+
+    // Shuffle masks used to rotate each AES column independently.
     //
-    // On AMD CPUs, the correct T-word appears in lane 3. We broadcast lane 3
-    // across all lanes using shuffle mask 0xff.
-    // -------------------------------------------------------------------------
-    temp = _mm_shuffle_epi32(temp, 0xff);
-    print_m128i_lanes("Broadcasted T-word:", temp);
+    // Originally, four separate shuffle masks were created—one for each column of
+    // the AES state matrix. However, after reorganizing the byte order to match the
+    // natural SIMD register layout (byte 0 at the LSB through byte 15 at the MSB),
+    // the first mask becomes a simple one-to-one mapping for the SIMD register .
+    //
+    // Once the first mask is aligned with the native SIMD ordering, the remaining
+    // three masks can be rearranged so that each corresponds to the correct byte
+    // positions relative to this canonical layout.
+    //
+    // This allows us to reuse the first mask as-is and define only three additional
+    // masks instead of four, reducing overhead while still producing the correct
+    // column rotations required for MixColumns.
 
-    uint32_t Tword = _mm_cvtsi128_si32(temp);
-    cout << "Extracted T-word = 0x" << hex << Tword << endl;
+    // const __m128i firstElementFromVector = _mm_set_epi8(
+    //    15, 11, 7, 3, 14, 10, 6, 2, 13, 9, 5, 1, 12, 8, 4, 0); //order for generating rows and columns exactly as per textbook AES representation
+    //     15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 
-    // -------------------------------------------------------------------------
-    // Step 3: Extract W0–W3 from the current key.
-    // -------------------------------------------------------------------------
-    uint32_t W0 = _mm_extract_epi32(currentKey, 0);
-    uint32_t W1 = _mm_extract_epi32(currentKey, 1);
-    uint32_t W2 = _mm_extract_epi32(currentKey, 2);
-    uint32_t W3 = _mm_extract_epi32(currentKey, 3);
+//   const __m128i secondElementFromVector = _mm_set_epi8(
+//       // 12, 8, 4, 0, 15, 11, 7, 3, 14, 10, 6, 2, 13, 9, 5, 1); //order for generating rows and columns exactly as per textbook AES representation
+//       12, 15, 14, 13, 8, 11, 10, 9, 4, 7, 6, 5, 0, 3, 2, 1);
+//
+//   const __m128i thirdElementFromVector = _mm_set_epi8(
+//       //    13, 9, 5, 1, 12, 8, 4, 0, 12, 8, 4, 0, 14, 10, 6, 2); //order for generating rows and columns exactly as per textbook AES representation
+//       13, 12, 12, 14, 9, 8, 8, 10, 5, 4, 4, 6, 1, 0, 0, 2);
+//
+//   const __m128i fourthElementFromVector = _mm_set_epi8(
+//       //    14, 10, 6, 2, 13, 9, 5, 1, 15, 11, 7, 3, 15, 11, 7, 3); //order for generating rows and columns exactly as per textbook AES representation
+//       14, 13, 15, 15, 10, 9, 11, 11, 6, 5, 7, 7, 2, 1, 3, 3);
 
-    // -------------------------------------------------------------------------
-    // Step 4: Compute W4–W7 using the AES-128 key schedule XOR chain.
-    // -------------------------------------------------------------------------
-    uint32_t W4 = W0 ^ Tword;
-    uint32_t W5 = W1 ^ W4;
-    uint32_t W6 = W2 ^ W5;
-    uint32_t W7 = W3 ^ W6;
+    //__m128i x2 = GF_multipyBy2(state);
+    //__m128i x3 = GF_multipyBy3(state);
 
-    // -------------------------------------------------------------------------
-    // Step 5: Pack W4–W7 into the next round key.
-    // -------------------------------------------------------------------------
-    __m128i nextKey = _mm_set_epi32(W7, W6, W5, W4);
+   //__m128i firstVector = _mm_shuffle_epi8(x2, firstElementFromVector);    //not shuffling cause we aliged the first matrix as per the SIMD register order
+   //__m128i secondVector = _mm_shuffle_epi8(x3, secondElementFromVector);    
+   //__m128i thirdVector = _mm_shuffle_epi8(state, thirdElementFromVector);   
+   //__m128i fourthVector = _mm_shuffle_epi8(state, fourthElementFromVector); 
 
-    print_m128i_lanes("Generated Round Key:", nextKey);
+    __m128i x2 = GF_multipyBy2(state);
+    __m128i x3 = GF_multipyBy3(state);
 
-    return nextKey;
+    __m128i secondVector = shiftBytesInsideBlock(x3,
+                                            RotateBlock::RotateColumns_SecondVectorAlignMask); 
+
+    __m128i thirdVector = shiftBytesInsideBlock(state,
+                                            RotateBlock::RotateColumns_ThirdVectorAlignMask);
+ 
+    __m128i fourthVector = shiftBytesInsideBlock(state,
+                                            RotateBlock::RotateColumns_FourthVectorAlignMask);
+
+
+    // MixColumns formula in SIMD form:
+    // Current_Element = 2*A + 3*B + C + D in GF
+    __m128i temp1 = _mm_xor_si128(x2, secondVector);          // 2*s ⊕ 3*s
+    __m128i temp2 = _mm_xor_si128(thirdVector, fourthVector); // 2*s ⊕ 3*s ⊕ s2
+    __m128i finalResult = _mm_xor_si128(temp1, temp2);        // // 2*s ⊕ 3*s ⊕ s2 ⊕ s3
+
+    return finalResult;
 }
 
-
-
-void Test_till_the_current_point(){
-
-      uint8_t Plaintext[16] = {
-        0x01, 0x23, 0x45, 0x67,
-        0x89, 0xab, 0xcd, 0xef,
-        0xfe, 0xdc, 0xba, 0x98,
-        0x76, 0x54, 0x32, 0x10};
-
-    uint8_t key[16] = {
-        0x0f, 0x15, 0x71, 0xc9,
-        0x47, 0xd9, 0xe8, 0x59,
-        0x0c, 0xb7, 0xad, 0xd6,
-        0xaf, 0x7f, 0x67, 0x98};
-
-    // Loading the plaintext and key into the SSE register type variables so as we can lerage the use of SSE instructions
-    __m128i PT = _mm_lddqu_si128((__m128i *)Plaintext);
-    __m128i Key = _mm_lddqu_si128((__m128i *)key);
-
-    print_m128i_lanes("Original Key:", Key);
-    print_m128i_lanes("Plaintext:", PT);
-
-    //AES128_CORE keyGen(Key);
-    
-    __m128i previousLane = _mm_shuffle_epi32(Key, 0xFF);
-     print_m128i_lanes("previousLane", previousLane);      
-    __m128i mask =  _mm_set_epi8(
-         12	, 15	,   14	,   13	,  
-         8	, 11	,   10	,   9	,  
-         4	, 7	    ,   6	,   5	,  
-         0	, 3	    ,   2	,   1	  
-    );
-
-    __m128i roated = _mm_shuffle_epi8(previousLane, mask);          
-    print_m128i_lanes("rotated", roated);       
-
-    __m128i rcon128 = _mm_set_epi32(RCON[1], 0, 0, 0);
-    print_m128i_lanes("RCON for round 1", rcon128);       
-
+// Nothing special for this part apart from XOR-ing current state with the roundkey
+__m128i AES128_CORE::addRoundKey(__m128i state, __m128i key)
+{
+    return _mm_xor_si128(state, key); 
 }
 
+// The constructor for AES_CORE. We only supply the startkey and the class generates all the 11 roundkeys itself
+// This is available to the user but the user still cannot see all the keys directly 
+AES128_CORE::AES128_CORE(const __m128i key)
+{
 
+    roundKeys[0] = key; /// adding the first RoundKey Manually to the Arrays
+    //     cout << "roundkey for R2";
+    //     expandKey(roundKeys[0], 0);
 
+    // running a loop to expand the key and storing all keys inside an array of type __m128i for efficient memory operations
+    for (uint8_t round = 0; round < 10; ++round)
+    {
+        expandKey(roundKeys[round], round);
+    }
+}
+
+// This method performs the actual encryption. We supply the input Data block(16 bye word) and the function performs 
+// all the round sof encryption in a single go.
+__m128i AES128_CORE::encryptBlock(__m128i block)
+{
+
+    block = _mm_xor_si128(block, roundKeys[0]); // prewhitening step that XORs the key and block
+    print_m128i_lanes("keyPreWhitening:", block);
+
+    for (int i = 1; i < 10; i++) // we have used the for loop here for demo. in Actual prod code, we'd had this block written 9 times to avoid jump overhead
+    {
+        cout << "Round <<" << i << ">>" << endl;
+
+        block = subBytes(block);
+        print_m128i_lanes("substitutedBlock:", block);
+
+        block = shiftRows(block);
+        print_m128i_lanes("rowsShiftedBlock", block);
+
+        block = mixColumns(block);
+        print_m128i_lanes("mixedColumnsBlock", block);
+
+        block = addRoundKey(block, roundKeys[i]);
+        print_m128i_lanes("roundKeyAdded", block);
+    }
+
+    cout << "Round <<" << 10 << ">>" << endl;
+
+    block = subBytes(block);
+    print_m128i_lanes("substitutedBlock:", block);
+
+    block = shiftRows(block);
+    print_m128i_lanes("rowsShiftedBlock", block);
+
+    block = addRoundKey(block, roundKeys[10]);
+    print_m128i_lanes("roundKeyAdded", block);
+
+    return block;
+}
+
+// This CLASS is only meant to verify the results.
+// We have called the actual instructions that were introduced back in 2009 by intel to speed up the encryption 
+// using hardware acceleraton
+class AES128_NI {
+public:
+    AES128_NI(const uint8_t key[16]) {
+        keyExpansion(key);
+    }
+
+    // Encrypt one 16‑byte block
+    inline void encryptBlock(uint8_t out[16], const uint8_t in[16]) const {
+        __m128i m = _mm_loadu_si128((const __m128i*)in);
+
+        m = _mm_xor_si128(m, roundKeys[0]);
+
+        for (int i = 1; i < 10; i++)
+            m = _mm_aesenc_si128(m, roundKeys[i]);
+
+        m = _mm_aesenclast_si128(m, roundKeys[10]);
+
+        _mm_storeu_si128((__m128i*)out, m);
+    }
+
+private:
+    __m128i roundKeys[11];
+
+    // Key expansion helper
+    static inline __m128i keyExpand(__m128i key, __m128i assist, int rcon) {
+        assist = _mm_shuffle_epi32(assist, _MM_SHUFFLE(3,3,3,3));
+        __m128i temp = key;
+
+        temp = _mm_xor_si128(temp, _mm_slli_si128(temp, 4));
+        temp = _mm_xor_si128(temp, _mm_slli_si128(temp, 4));
+        temp = _mm_xor_si128(temp, _mm_slli_si128(temp, 4));
+
+        __m128i rconVec = _mm_set_epi32(0,0,0,rcon);
+        assist = _mm_xor_si128(assist, rconVec);
+
+        return _mm_xor_si128(temp, assist);
+    }
+
+    // Expand AES‑128 key into 11 round keys
+    void keyExpansion(const uint8_t key[16]) {
+        roundKeys[0] = _mm_loadu_si128((const __m128i*)key);
+
+        for (int i = 0; i < 10; i++) {
+            __m128i assist = _mm_aeskeygenassist_si128(roundKeys[i], (i+1));
+            roundKeys[i+1] = keyExpand(roundKeys[i], assist, (i+1));
+        }
+    }
+};
+ 
+ 
 int main()
 {
 
@@ -479,39 +551,7 @@ int main()
     AES128_CORE keyGen(Key);
 
     __m128i CT = keyGen.encryptBlock(PT);
-  //   print_m128i_lanes("CT Substituted:", PT);
-     
-     
-
+    //   print_m128i_lanes("CT Substituted:", PT);
 }
 
-
-
-
-//   // Pre-whitening - XOR-ing the plaintext with the encryption key
-//   __m128i Pre_Whitening = _mm_xor_si128(PT, Key);
-//
-//   print_m128i_lanes("Pre-whitening", Pre_Whitening);
-//
-//   __m128i block = Pre_Whitening;
-
-//   // Rounds 1–9 (full rounds)
-//   for (int i = 1; i < 10; i++)
-//   {
-//       Key = generateRoundKey(Key, i);
-//       block = _mm_aesenc_si128(block, Key);
-//
-//       cout << "####   Round :" << i << endl;
-//       print_m128i_lanes("Key ", Key);
-//       print_m128i_lanes("Cyphertext ", block);
-//       cout << "####   END of Round :" << endl;
-//   }
-//
-//   // Final round (no MixColumns)
-//   block = _mm_aesenclast_si128(block, generateRoundKey(Key, 10));
-//   cout << "####   Round :" << 10 << endl;
-//   print_m128i_lanes("Key ", Key);
-//   print_m128i_lanes("Cyphertext ", block);
-//   cout << "####   END of Round :" << endl;
-//
-//   return 0;
+ 
